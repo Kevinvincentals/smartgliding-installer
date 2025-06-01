@@ -35,7 +35,8 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-INSTALL_DIR="smartgliding"
+INSTALL_DIR="/opt/smartgliding"
+SMARTGLIDING_USER="smartgliding"
 COMPOSE_VERSION="v2.21.0"
 
 # Print colored output
@@ -234,12 +235,57 @@ verify_docker() {
     fi
 }
 
+# Create smartgliding system user
+create_smartgliding_user() {
+    print_status "Setting up smartgliding system user..."
+    
+    # Set sudo prefix based on whether we're root or not
+    local SUDO_PREFIX=""
+    if [ "$RUNNING_AS_ROOT" = false ]; then
+        SUDO_PREFIX="sudo"
+    fi
+    
+    # Check if user already exists
+    if id "$SMARTGLIDING_USER" &>/dev/null; then
+        print_success "User '$SMARTGLIDING_USER' already exists"
+    else
+        print_status "Creating system user '$SMARTGLIDING_USER'..."
+        
+        # Create system user with home directory
+        $SUDO_PREFIX useradd --system \
+            --home-dir "$INSTALL_DIR" \
+            --create-home \
+            --shell /usr/sbin/nologin \
+            --comment "SmartGliding Platform Service User" \
+            "$SMARTGLIDING_USER"
+        
+        print_success "Created system user '$SMARTGLIDING_USER'"
+    fi
+    
+    # Add smartgliding user to docker group
+    print_status "Adding '$SMARTGLIDING_USER' to docker group..."
+    $SUDO_PREFIX usermod -aG docker "$SMARTGLIDING_USER"
+    print_success "User '$SMARTGLIDING_USER' added to docker group"
+    
+    # Ensure the installation directory exists and has correct ownership
+    $SUDO_PREFIX mkdir -p "$INSTALL_DIR"
+    $SUDO_PREFIX chown "$SMARTGLIDING_USER:$SMARTGLIDING_USER" "$INSTALL_DIR"
+    print_success "Installation directory prepared: $INSTALL_DIR"
+}
+
 # Create installation directory and docker-compose.yml
 create_installation() {
-    print_status "Creating installation directory..."
+    print_status "Creating installation files..."
     
-    if [ -d "$INSTALL_DIR" ]; then
-        print_warning "Directory $INSTALL_DIR already exists"
+    # Set sudo prefix based on whether we're root or not
+    local SUDO_PREFIX=""
+    if [ "$RUNNING_AS_ROOT" = false ]; then
+        SUDO_PREFIX="sudo"
+    fi
+    
+    # Check if directory already has files
+    if [ -f "$INSTALL_DIR/docker-compose.yml" ]; then
+        print_warning "SmartGliding installation already exists in $INSTALL_DIR"
         read -p "Do you want to continue and overwrite? (y/N): " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -248,19 +294,19 @@ create_installation() {
         fi
     fi
     
-    mkdir -p "$INSTALL_DIR"
-    cd "$INSTALL_DIR"
-    
     print_status "Downloading docker-compose.yml from GitHub..."
     
+    # Create temporary file with correct permissions
+    TEMP_COMPOSE=$(mktemp)
+    
     # Try to download from GitHub first
-    if curl -fsSL -o docker-compose.yml \
+    if curl -fsSL -o "$TEMP_COMPOSE" \
         "https://raw.githubusercontent.com/Kevinvincentals/smartgliding-web/main/docker-compose.yml" 2>/dev/null; then
         print_success "Downloaded latest docker-compose.yml from GitHub"
     else
         print_warning "Failed to download from GitHub, using embedded fallback version"
         
-        cat > docker-compose.yml << 'EOF'
+        cat > "$TEMP_COMPOSE" << 'EOF'
 services:
   smartgliding-web:
     image: ghcr.io/kevinvincentals/smartgliding-web:latest
@@ -280,6 +326,7 @@ services:
     restart: unless-stopped
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
+    user: "${SMARTGLIDING_UID}:${SMARTGLIDING_GID}"
 
   smartgliding-ogn-backend:
     image: ghcr.io/kevinvincentals/smartgliding-ogn-backend:latest
@@ -299,6 +346,7 @@ services:
     restart: unless-stopped
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
+    user: "${SMARTGLIDING_UID}:${SMARTGLIDING_GID}"
 
   mongodb:
     image: mongo:7
@@ -311,6 +359,7 @@ services:
       interval: 5s
       timeout: 2s
       retries: 10
+    user: "${SMARTGLIDING_UID}:${SMARTGLIDING_GID}"
 
   mongodb-setup:
     image: mongo:7
@@ -332,6 +381,7 @@ services:
       }
       "
     restart: "no"
+    user: "${SMARTGLIDING_UID}:${SMARTGLIDING_GID}"
 
   watchtower:
     image: containrrr/watchtower:latest
@@ -356,20 +406,48 @@ volumes:
 EOF
     fi
     
-    print_success "Installation files created in $(pwd)"
+    # Get smartgliding user UID and GID
+    SMARTGLIDING_UID=$(id -u "$SMARTGLIDING_USER")
+    SMARTGLIDING_GID=$(id -g "$SMARTGLIDING_USER")
+    
+    # Move the compose file to the installation directory with proper ownership
+    $SUDO_PREFIX mv "$TEMP_COMPOSE" "$INSTALL_DIR/docker-compose.yml"
+    $SUDO_PREFIX chown "$SMARTGLIDING_USER:$SMARTGLIDING_USER" "$INSTALL_DIR/docker-compose.yml"
+    
+    # Create .env file with user mapping
+    $SUDO_PREFIX tee "$INSTALL_DIR/.env" > /dev/null << EOF
+SMARTGLIDING_UID=$SMARTGLIDING_UID
+SMARTGLIDING_GID=$SMARTGLIDING_GID
+EOF
+    $SUDO_PREFIX chown "$SMARTGLIDING_USER:$SMARTGLIDING_USER" "$INSTALL_DIR/.env"
+    
+    # Create database directory with correct ownership
+    $SUDO_PREFIX mkdir -p "$INSTALL_DIR/database"
+    $SUDO_PREFIX chown "$SMARTGLIDING_USER:$SMARTGLIDING_USER" "$INSTALL_DIR/database"
+    
+    print_success "Installation files created in $INSTALL_DIR"
 }
 
 # Deploy the stack
 deploy_stack() {
     print_status "Deploying SmartGliding platform..."
     
+    # Set sudo prefix based on whether we're root or not
+    local SUDO_PREFIX=""
+    if [ "$RUNNING_AS_ROOT" = false ]; then
+        SUDO_PREFIX="sudo"
+    fi
+    
+    # Change to installation directory
+    cd "$INSTALL_DIR"
+    
     # Pull images first
     print_status "Pulling Docker images (this may take a few minutes)..."
-    ${USE_SUDO} docker compose pull
+    $SUDO_PREFIX -u "$SMARTGLIDING_USER" docker compose pull
     
     # Start services
     print_status "Starting services..."
-    ${USE_SUDO} docker compose up -d
+    $SUDO_PREFIX -u "$SMARTGLIDING_USER" docker compose up -d
     
     print_success "Services started successfully"
 }
@@ -417,12 +495,13 @@ show_completion() {
     echo "3. Complete the initial setup with your club information"
     echo
     echo -e "${BLUE}Useful Commands:${NC}"
-    echo "• View logs:      ${USE_SUDO} docker compose logs"
-    echo "• Stop services:  ${USE_SUDO} docker compose down"
-    echo "• Start services: ${USE_SUDO} docker compose up -d"
-    echo "• Update system:  ${USE_SUDO} docker compose pull && ${USE_SUDO} docker compose up -d"
+    echo "• View logs:      sudo -u $SMARTGLIDING_USER docker compose -f $INSTALL_DIR/docker-compose.yml logs"
+    echo "• Stop services:  sudo -u $SMARTGLIDING_USER docker compose -f $INSTALL_DIR/docker-compose.yml down"
+    echo "• Start services: sudo -u $SMARTGLIDING_USER docker compose -f $INSTALL_DIR/docker-compose.yml up -d"
+    echo "• Update system:  sudo -u $SMARTGLIDING_USER docker compose -f $INSTALL_DIR/docker-compose.yml pull && sudo -u $SMARTGLIDING_USER docker compose -f $INSTALL_DIR/docker-compose.yml up -d"
     echo
-    echo -e "${YELLOW}Installation directory: $(pwd)${NC}"
+    echo -e "${YELLOW}Installation directory: $INSTALL_DIR${NC}"
+    echo -e "${YELLOW}Service user: $SMARTGLIDING_USER${NC}"
     echo
     print_success "Welcome to SmartGliding! 🛩️"
 }
@@ -435,6 +514,7 @@ main() {
     detect_os
     install_docker
     verify_docker
+    create_smartgliding_user
     create_installation
     deploy_stack
     wait_for_services
