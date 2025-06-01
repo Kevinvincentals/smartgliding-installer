@@ -339,8 +339,7 @@ configure_installation() {
         print_status "Database Configuration"
         echo "SmartGliding can use either an embedded MongoDB or connect to your existing database."
         echo
-        read -p "Do you have your own MongoDB database you want to use? (y/N): " -n 1 -r
-        echo
+        read -p "Do you have your own MongoDB database you want to use? (y/N): " -r
         echo
         
         if [[ $REPLY =~ ^[Yy]$ ]]; then
@@ -372,51 +371,66 @@ configure_installation() {
     
     echo
     print_status "Security Configuration"
-    print_status "Generating secure random values for JWT secret and API keys..."
     
-    # Generate random secrets or use environment variables
-    if [ ! -z "$SMARTGLIDING_JWT_SECRET" ]; then
+    # Handle security settings based on mode and environment variables
+    if [ ! -z "$SMARTGLIDING_JWT_SECRET" ] && [ ! -z "$SMARTGLIDING_WEBHOOK_KEY" ]; then
+        # Both provided via environment
         JWT_SECRET="$SMARTGLIDING_JWT_SECRET"
-        print_success "Using JWT secret from environment: ${JWT_SECRET:0:8}... (${#JWT_SECRET} characters)"
-    else
-        JWT_SECRET=$(generate_random_string 64)
-        print_success "Generated JWT secret: ${JWT_SECRET:0:8}... (64 characters)"
-    fi
-    
-    if [ ! -z "$SMARTGLIDING_WEBHOOK_KEY" ]; then
         WEBHOOK_API_KEY="$SMARTGLIDING_WEBHOOK_KEY"
+        print_success "Using JWT secret from environment: ${JWT_SECRET:0:8}... (${#JWT_SECRET} characters)"
         print_success "Using webhook key from environment: ${WEBHOOK_API_KEY:0:8}... (${#WEBHOOK_API_KEY} characters)"
-    else
-        WEBHOOK_API_KEY=$(generate_random_string 32)
-        print_success "Generated webhook API key: ${WEBHOOK_API_KEY:0:8}... (32 characters)"
-    fi
-    
-    if [ "$INTERACTIVE_MODE" = true ] && [ -z "$SMARTGLIDING_JWT_SECRET" ] && [ -z "$SMARTGLIDING_WEBHOOK_KEY" ]; then
+    elif [ "$INTERACTIVE_MODE" = true ]; then
+        # Interactive mode - ask user preference first
+        echo "SmartGliding requires a JWT secret and webhook API key for security."
         echo
-        read -p "Do you want to customize these security settings? (y/N): " -n 1 -r
+        read -p "Do you want to set custom JWT secret and webhook API key? (y/N): " -r
         echo
         
         if [[ $REPLY =~ ^[Yy]$ ]]; then
+            # User wants custom secrets
             echo
-            print_status "Current JWT Secret: $JWT_SECRET"
-            read -p "Enter custom JWT secret (or press Enter to keep current): " CUSTOM_JWT
-            if [ ! -z "$CUSTOM_JWT" ]; then
-                JWT_SECRET="$CUSTOM_JWT"
-                print_success "JWT secret updated"
-            fi
+            read -p "Enter JWT secret (minimum 32 characters): " JWT_SECRET
+            while [ ${#JWT_SECRET} -lt 32 ]; do
+                print_error "JWT secret must be at least 32 characters long"
+                read -p "Enter JWT secret (minimum 32 characters): " JWT_SECRET
+            done
+            print_success "Custom JWT secret set: ${JWT_SECRET:0:8}... (${#JWT_SECRET} characters)"
             
             echo
-            print_status "Current Webhook API Key: $WEBHOOK_API_KEY"
-            read -p "Enter custom webhook API key (or press Enter to keep current): " CUSTOM_WEBHOOK
-            if [ ! -z "$CUSTOM_WEBHOOK" ]; then
-                WEBHOOK_API_KEY="$CUSTOM_WEBHOOK"
-                print_success "Webhook API key updated"
-            fi
+            read -p "Enter webhook API key (minimum 16 characters): " WEBHOOK_API_KEY
+            while [ ${#WEBHOOK_API_KEY} -lt 16 ]; do
+                print_error "Webhook API key must be at least 16 characters long"
+                read -p "Enter webhook API key (minimum 16 characters): " WEBHOOK_API_KEY
+            done
+            print_success "Custom webhook API key set: ${WEBHOOK_API_KEY:0:8}... (${#WEBHOOK_API_KEY} characters)"
+        else
+            # User wants generated secrets
+            print_status "Generating secure random values..."
+            JWT_SECRET=$(generate_random_string 64)
+            WEBHOOK_API_KEY=$(generate_random_string 32)
+            print_success "Generated JWT secret: ${JWT_SECRET:0:8}... (64 characters)"
+            print_success "Generated webhook API key: ${WEBHOOK_API_KEY:0:8}... (32 characters)"
         fi
-    elif [ ! -z "$SMARTGLIDING_JWT_SECRET" ] || [ ! -z "$SMARTGLIDING_WEBHOOK_KEY" ]; then
-        print_status "Using provided environment variables for security settings"
     else
-        print_status "Using generated secure defaults (non-interactive mode)"
+        # Non-interactive mode - generate secure defaults
+        print_status "Generating secure random values for JWT secret and API keys..."
+        
+        # Use environment variables if provided, otherwise generate
+        if [ ! -z "$SMARTGLIDING_JWT_SECRET" ]; then
+            JWT_SECRET="$SMARTGLIDING_JWT_SECRET"
+            print_success "Using JWT secret from environment: ${JWT_SECRET:0:8}... (${#JWT_SECRET} characters)"
+        else
+            JWT_SECRET=$(generate_random_string 64)
+            print_success "Generated JWT secret: ${JWT_SECRET:0:8}... (64 characters)"
+        fi
+        
+        if [ ! -z "$SMARTGLIDING_WEBHOOK_KEY" ]; then
+            WEBHOOK_API_KEY="$SMARTGLIDING_WEBHOOK_KEY"
+            print_success "Using webhook key from environment: ${WEBHOOK_API_KEY:0:8}... (${#WEBHOOK_API_KEY} characters)"
+        else
+            WEBHOOK_API_KEY=$(generate_random_string 32)
+            print_success "Generated webhook API key: ${WEBHOOK_API_KEY:0:8}... (32 characters)"
+        fi
     fi
     
     echo
@@ -453,10 +467,36 @@ create_installation() {
     # Create temporary file with correct permissions
     TEMP_COMPOSE=$(mktemp)
     
-    # Generate docker-compose.yml based on database choice
-    if [ "$USE_EXTERNAL_DB" = true ]; then
-        # External database - no MongoDB services
-        cat > "$TEMP_COMPOSE" << EOF
+    # Try to download from GitHub first
+    if curl -fsSL -o "$TEMP_COMPOSE" \
+        "https://raw.githubusercontent.com/Kevinvincentals/smartgliding-web/main/docker-compose.yml" 2>/dev/null; then
+        print_success "Downloaded latest docker-compose.yml from GitHub"
+        
+        # Replace environment variables in the downloaded file
+        sed -i "s|DATABASE_URL=.*|DATABASE_URL=$MONGODB_URL|g" "$TEMP_COMPOSE"
+        sed -i "s|JWT_SECRET=.*|JWT_SECRET=$JWT_SECRET|g" "$TEMP_COMPOSE"
+        sed -i "s|WEBHOOK_API_KEY=.*|WEBHOOK_API_KEY=$WEBHOOK_API_KEY|g" "$TEMP_COMPOSE"
+        
+        # Add user mapping if not present
+        if ! grep -q "user:" "$TEMP_COMPOSE"; then
+            sed -i '/restart: unless-stopped/a\    user: "${SMARTGLIDING_UID}:${SMARTGLIDING_GID}"' "$TEMP_COMPOSE"
+        fi
+        
+        # Remove MongoDB services if using external database
+        if [ "$USE_EXTERNAL_DB" = true ]; then
+            # Create a temporary file for the modified compose
+            TEMP_EXTERNAL=$(mktemp)
+            # Extract only the services we need for external DB
+            awk '/^services:/{p=1} p && /^  (smartgliding-web|smartgliding-ogn-backend|watchtower):/{s=$2; p=1} p && /^  [a-zA-Z]/ && !/^  (smartgliding-web|smartgliding-ogn-backend|watchtower|mongodb):/{if(s!="") p=0} p && /^volumes:/{p=1} p' "$TEMP_COMPOSE" > "$TEMP_EXTERNAL"
+            mv "$TEMP_EXTERNAL" "$TEMP_COMPOSE"
+        fi
+    else
+        print_warning "Failed to download from GitHub, using embedded fallback version"
+        
+        # Generate docker-compose.yml based on database choice
+        if [ "$USE_EXTERNAL_DB" = true ]; then
+            # External database - no MongoDB services
+            cat > "$TEMP_COMPOSE" << 'EOF'
 services:
   smartgliding-web:
     image: ghcr.io/kevinvincentals/smartgliding-web:latest
@@ -464,17 +504,17 @@ services:
       - "3000:3000"
     environment:
       - NODE_ENV=production
-      - DATABASE_URL=$MONGODB_URL
-      - JWT_SECRET=$JWT_SECRET
+      - DATABASE_URL=${DATABASE_URL}
+      - JWT_SECRET=${JWT_SECRET}
       - PLANE_TRACKER_WS_URL=ws://smartgliding-ogn-backend:8765
-      - WEBHOOK_API_KEY=$WEBHOOK_API_KEY
+      - WEBHOOK_API_KEY=${WEBHOOK_API_KEY}
     depends_on:
       smartgliding-ogn-backend:
         condition: service_started
     restart: unless-stopped
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
-    user: "\${SMARTGLIDING_UID}:\${SMARTGLIDING_GID}"
+    user: "${SMARTGLIDING_UID}:${SMARTGLIDING_GID}"
 
   smartgliding-ogn-backend:
     image: ghcr.io/kevinvincentals/smartgliding-ogn-backend:latest
@@ -484,14 +524,14 @@ services:
     volumes:
       - ogn_data:/data
     environment:
-      - DATABASE_URL=$MONGODB_URL
+      - DATABASE_URL=${DATABASE_URL}
       - WEBHOOK_URL=http://smartgliding-web:3000/api/webhooks/flights
-      - WEBHOOK_API_KEY=$WEBHOOK_API_KEY
+      - WEBHOOK_API_KEY=${WEBHOOK_API_KEY}
       - WEBHOOK_ENABLED=true
     restart: unless-stopped
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
-    user: "\${SMARTGLIDING_UID}:\${SMARTGLIDING_GID}"
+    user: "${SMARTGLIDING_UID}:${SMARTGLIDING_GID}"
 
   watchtower:
     image: containrrr/watchtower:latest
@@ -500,10 +540,10 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      - WATCHTOWER_POLL_INTERVAL=3600  # Check every hour (3600 seconds)
-      - WATCHTOWER_CLEANUP=true        # Remove old images after updating
+      - WATCHTOWER_POLL_INTERVAL=3600
+      - WATCHTOWER_CLEANUP=true
       - WATCHTOWER_INCLUDE_RESTARTING=true
-      - WATCHTOWER_LABEL_ENABLE=true   # Only monitor containers with watchtower labels
+      - WATCHTOWER_LABEL_ENABLE=true
     command: --interval 3600 --cleanup
     depends_on:
       smartgliding-web:
@@ -514,9 +554,9 @@ services:
 volumes:
   ogn_data:
 EOF
-    else
-        # Embedded database - include MongoDB services
-        cat > "$TEMP_COMPOSE" << EOF
+        else
+            # Embedded database - include MongoDB services
+            cat > "$TEMP_COMPOSE" << 'EOF'
 services:
   smartgliding-web:
     image: ghcr.io/kevinvincentals/smartgliding-web:latest
@@ -524,10 +564,10 @@ services:
       - "3000:3000"
     environment:
       - NODE_ENV=production
-      - DATABASE_URL=$MONGODB_URL
-      - JWT_SECRET=$JWT_SECRET
+      - DATABASE_URL=${DATABASE_URL}
+      - JWT_SECRET=${JWT_SECRET}
       - PLANE_TRACKER_WS_URL=ws://smartgliding-ogn-backend:8765
-      - WEBHOOK_API_KEY=$WEBHOOK_API_KEY
+      - WEBHOOK_API_KEY=${WEBHOOK_API_KEY}
     depends_on:
       mongodb-setup:
         condition: service_completed_successfully
@@ -536,7 +576,7 @@ services:
     restart: unless-stopped
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
-    user: "\${SMARTGLIDING_UID}:\${SMARTGLIDING_GID}"
+    user: "${SMARTGLIDING_UID}:${SMARTGLIDING_GID}"
 
   smartgliding-ogn-backend:
     image: ghcr.io/kevinvincentals/smartgliding-ogn-backend:latest
@@ -546,9 +586,9 @@ services:
     volumes:
       - ogn_data:/data
     environment:
-      - DATABASE_URL=$MONGODB_URL
+      - DATABASE_URL=${DATABASE_URL}
       - WEBHOOK_URL=http://smartgliding-web:3000/api/webhooks/flights
-      - WEBHOOK_API_KEY=$WEBHOOK_API_KEY
+      - WEBHOOK_API_KEY=${WEBHOOK_API_KEY}
       - WEBHOOK_ENABLED=true
     depends_on:
       mongodb-setup:
@@ -556,7 +596,7 @@ services:
     restart: unless-stopped
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
-    user: "\${SMARTGLIDING_UID}:\${SMARTGLIDING_GID}"
+    user: "${SMARTGLIDING_UID}:${SMARTGLIDING_GID}"
 
   mongodb:
     image: mongo:7
@@ -569,7 +609,7 @@ services:
       interval: 5s
       timeout: 2s
       retries: 10
-    user: "\${SMARTGLIDING_UID}:\${SMARTGLIDING_GID}"
+    user: "${SMARTGLIDING_UID}:${SMARTGLIDING_GID}"
 
   mongodb-setup:
     image: mongo:7
@@ -591,7 +631,7 @@ services:
       }
       "
     restart: "no"
-    user: "\${SMARTGLIDING_UID}:\${SMARTGLIDING_GID}"
+    user: "${SMARTGLIDING_UID}:${SMARTGLIDING_GID}"
 
   watchtower:
     image: containrrr/watchtower:latest
@@ -600,10 +640,10 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      - WATCHTOWER_POLL_INTERVAL=3600  # Check every hour (3600 seconds)
-      - WATCHTOWER_CLEANUP=true        # Remove old images after updating
+      - WATCHTOWER_POLL_INTERVAL=3600
+      - WATCHTOWER_CLEANUP=true
       - WATCHTOWER_INCLUDE_RESTARTING=true
-      - WATCHTOWER_LABEL_ENABLE=true   # Only monitor containers with watchtower labels
+      - WATCHTOWER_LABEL_ENABLE=true
     command: --interval 3600 --cleanup
     depends_on:
       smartgliding-web:
@@ -614,6 +654,7 @@ services:
 volumes:
   ogn_data:
 EOF
+        fi
     fi
     
     # Get smartgliding user UID and GID
@@ -703,10 +744,12 @@ show_completion() {
     echo -e "${BLUE}Configuration Summary:${NC}"
     echo "• Database: $([ "$USE_EXTERNAL_DB" = true ] && echo "External MongoDB" || echo "Embedded MongoDB")"
     echo "• Database URL: $MONGODB_URL"
-    echo "• JWT Secret: ${JWT_SECRET:0:12}... (${#JWT_SECRET} characters)"
-    echo "• Webhook API Key: ${WEBHOOK_API_KEY:0:8}... (${#WEBHOOK_API_KEY} characters)"
     echo "• Installation Directory: $INSTALL_DIR"
     echo "• Service User: $SMARTGLIDING_USER"
+    echo
+    echo -e "${YELLOW}Security Configuration (save these values):${NC}"
+    echo "• JWT Secret: $JWT_SECRET"
+    echo "• Webhook API Key: $WEBHOOK_API_KEY"
     echo
     echo -e "${BLUE}Next Steps:${NC}"
     echo "1. Open your web browser"
