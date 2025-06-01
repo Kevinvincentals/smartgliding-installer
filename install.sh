@@ -285,6 +285,87 @@ create_smartgliding_user() {
     print_success "Installation directory prepared: $INSTALL_DIR"
 }
 
+# Generate secure random string
+generate_random_string() {
+    local length=${1:-32}
+    openssl rand -base64 $length | tr -d "=+/" | cut -c1-$length
+}
+
+# Interactive configuration
+configure_installation() {
+    print_status "Starting interactive configuration..."
+    echo
+    
+    # Database configuration
+    print_status "Database Configuration"
+    echo "SmartGliding can use either an embedded MongoDB or connect to your existing database."
+    echo
+    read -p "Do you have your own MongoDB database you want to use? (y/N): " -n 1 -r
+    echo
+    echo
+    
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        USE_EXTERNAL_DB=true
+        print_status "Please provide your MongoDB connection string."
+        echo "Example: mongodb://username:password@your-server:27017/smartgliding?replicaSet=rs0"
+        echo "Or: mongodb+srv://username:password@cluster.mongodb.net/smartgliding"
+        echo
+        read -p "MongoDB URL: " MONGODB_URL
+        
+        # Validate URL format
+        if [[ ! $MONGODB_URL =~ ^mongodb(\+srv)?:// ]]; then
+            print_error "Invalid MongoDB URL format. Please ensure it starts with mongodb:// or mongodb+srv://"
+            exit 1
+        fi
+        
+        print_success "External MongoDB configured: $MONGODB_URL"
+    else
+        USE_EXTERNAL_DB=false
+        print_success "Will use embedded MongoDB with automatic setup"
+        MONGODB_URL="mongodb://mongodb:27017/smartgliding?replicaSet=rs0"
+    fi
+    
+    echo
+    print_status "Security Configuration"
+    echo "Generating secure random values for JWT secret and API keys..."
+    
+    # Generate random secrets
+    JWT_SECRET=$(generate_random_string 64)
+    WEBHOOK_API_KEY=$(generate_random_string 32)
+    
+    print_success "Generated JWT secret: ${JWT_SECRET:0:8}... (64 characters)"
+    print_success "Generated webhook API key: ${WEBHOOK_API_KEY:0:8}... (32 characters)"
+    
+    echo
+    read -p "Do you want to customize these security settings? (y/N): " -n 1 -r
+    echo
+    
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo
+        print_status "Current JWT Secret: $JWT_SECRET"
+        read -p "Enter custom JWT secret (or press Enter to keep current): " CUSTOM_JWT
+        if [ ! -z "$CUSTOM_JWT" ]; then
+            JWT_SECRET="$CUSTOM_JWT"
+            print_success "JWT secret updated"
+        fi
+        
+        echo
+        print_status "Current Webhook API Key: $WEBHOOK_API_KEY"
+        read -p "Enter custom webhook API key (or press Enter to keep current): " CUSTOM_WEBHOOK
+        if [ ! -z "$CUSTOM_WEBHOOK" ]; then
+            WEBHOOK_API_KEY="$CUSTOM_WEBHOOK"
+            print_success "Webhook API key updated"
+        fi
+    fi
+    
+    echo
+    print_success "Configuration completed!"
+    print_status "Database: $([ "$USE_EXTERNAL_DB" = true ] && echo "External MongoDB" || echo "Embedded MongoDB")"
+    print_status "JWT Secret: ${JWT_SECRET:0:8}... (${#JWT_SECRET} characters)"
+    print_status "Webhook API Key: ${WEBHOOK_API_KEY:0:8}... (${#WEBHOOK_API_KEY} characters)"
+    echo
+}
+
 # Create installation directory and docker-compose.yml
 create_installation() {
     print_status "Creating installation files..."
@@ -306,19 +387,15 @@ create_installation() {
         fi
     fi
     
-    print_status "Downloading docker-compose.yml from GitHub..."
+    print_status "Creating docker-compose.yml with your configuration..."
     
     # Create temporary file with correct permissions
     TEMP_COMPOSE=$(mktemp)
     
-    # Try to download from GitHub first
-    if curl -fsSL -o "$TEMP_COMPOSE" \
-        "https://raw.githubusercontent.com/Kevinvincentals/smartgliding-web/main/docker-compose.yml" 2>/dev/null; then
-        print_success "Downloaded latest docker-compose.yml from GitHub"
-    else
-        print_warning "Failed to download from GitHub, using embedded fallback version"
-        
-        cat > "$TEMP_COMPOSE" << 'EOF'
+    # Generate docker-compose.yml based on database choice
+    if [ "$USE_EXTERNAL_DB" = true ]; then
+        # External database - no MongoDB services
+        cat > "$TEMP_COMPOSE" << EOF
 services:
   smartgliding-web:
     image: ghcr.io/kevinvincentals/smartgliding-web:latest
@@ -326,19 +403,17 @@ services:
       - "3000:3000"
     environment:
       - NODE_ENV=production
-      - DATABASE_URL=mongodb://mongodb:27017/smartgliding?replicaSet=rs0
-      - JWT_SECRET=your-super-secret-key-change-this-in-production
+      - DATABASE_URL=$MONGODB_URL
+      - JWT_SECRET=$JWT_SECRET
       - PLANE_TRACKER_WS_URL=ws://smartgliding-ogn-backend:8765
-      - WEBHOOK_API_KEY=secret
+      - WEBHOOK_API_KEY=$WEBHOOK_API_KEY
     depends_on:
-      mongodb-setup:
-        condition: service_completed_successfully
       smartgliding-ogn-backend:
         condition: service_started
     restart: unless-stopped
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
-    user: "${SMARTGLIDING_UID}:${SMARTGLIDING_GID}"
+    user: "\${SMARTGLIDING_UID}:\${SMARTGLIDING_GID}"
 
   smartgliding-ogn-backend:
     image: ghcr.io/kevinvincentals/smartgliding-ogn-backend:latest
@@ -348,9 +423,71 @@ services:
     volumes:
       - ogn_data:/data
     environment:
-      - DATABASE_URL=mongodb://mongodb:27017/smartgliding?replicaSet=rs0
+      - DATABASE_URL=$MONGODB_URL
       - WEBHOOK_URL=http://smartgliding-web:3000/api/webhooks/flights
-      - WEBHOOK_API_KEY=secret
+      - WEBHOOK_API_KEY=$WEBHOOK_API_KEY
+      - WEBHOOK_ENABLED=true
+    restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    user: "\${SMARTGLIDING_UID}:\${SMARTGLIDING_GID}"
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_POLL_INTERVAL=3600  # Check every hour (3600 seconds)
+      - WATCHTOWER_CLEANUP=true        # Remove old images after updating
+      - WATCHTOWER_INCLUDE_RESTARTING=true
+      - WATCHTOWER_LABEL_ENABLE=true   # Only monitor containers with watchtower labels
+    command: --interval 3600 --cleanup
+    depends_on:
+      smartgliding-web:
+        condition: service_started
+      smartgliding-ogn-backend:
+        condition: service_started
+
+volumes:
+  ogn_data:
+EOF
+    else
+        # Embedded database - include MongoDB services
+        cat > "$TEMP_COMPOSE" << EOF
+services:
+  smartgliding-web:
+    image: ghcr.io/kevinvincentals/smartgliding-web:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=$MONGODB_URL
+      - JWT_SECRET=$JWT_SECRET
+      - PLANE_TRACKER_WS_URL=ws://smartgliding-ogn-backend:8765
+      - WEBHOOK_API_KEY=$WEBHOOK_API_KEY
+    depends_on:
+      mongodb-setup:
+        condition: service_completed_successfully
+      smartgliding-ogn-backend:
+        condition: service_started
+    restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    user: "\${SMARTGLIDING_UID}:\${SMARTGLIDING_GID}"
+
+  smartgliding-ogn-backend:
+    image: ghcr.io/kevinvincentals/smartgliding-ogn-backend:latest
+    container_name: smartgliding-ogn-backend
+    ports:
+      - "8765:8765"
+    volumes:
+      - ogn_data:/data
+    environment:
+      - DATABASE_URL=$MONGODB_URL
+      - WEBHOOK_URL=http://smartgliding-web:3000/api/webhooks/flights
+      - WEBHOOK_API_KEY=$WEBHOOK_API_KEY
       - WEBHOOK_ENABLED=true
     depends_on:
       mongodb-setup:
@@ -358,7 +495,7 @@ services:
     restart: unless-stopped
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
-    user: "${SMARTGLIDING_UID}:${SMARTGLIDING_GID}"
+    user: "\${SMARTGLIDING_UID}:\${SMARTGLIDING_GID}"
 
   mongodb:
     image: mongo:7
@@ -371,7 +508,7 @@ services:
       interval: 5s
       timeout: 2s
       retries: 10
-    user: "${SMARTGLIDING_UID}:${SMARTGLIDING_GID}"
+    user: "\${SMARTGLIDING_UID}:\${SMARTGLIDING_GID}"
 
   mongodb-setup:
     image: mongo:7
@@ -393,7 +530,7 @@ services:
       }
       "
     restart: "no"
-    user: "${SMARTGLIDING_UID}:${SMARTGLIDING_GID}"
+    user: "\${SMARTGLIDING_UID}:\${SMARTGLIDING_GID}"
 
   watchtower:
     image: containrrr/watchtower:latest
@@ -426,18 +563,26 @@ EOF
     $SUDO_PREFIX mv "$TEMP_COMPOSE" "$INSTALL_DIR/docker-compose.yml"
     $SUDO_PREFIX chown "$SMARTGLIDING_USER:$SMARTGLIDING_USER" "$INSTALL_DIR/docker-compose.yml"
     
-    # Create .env file with user mapping
+    # Create .env file with user mapping and configuration
     $SUDO_PREFIX tee "$INSTALL_DIR/.env" > /dev/null << EOF
 SMARTGLIDING_UID=$SMARTGLIDING_UID
 SMARTGLIDING_GID=$SMARTGLIDING_GID
+USE_EXTERNAL_DB=$USE_EXTERNAL_DB
+DATABASE_URL=$MONGODB_URL
+JWT_SECRET=$JWT_SECRET
+WEBHOOK_API_KEY=$WEBHOOK_API_KEY
 EOF
     $SUDO_PREFIX chown "$SMARTGLIDING_USER:$SMARTGLIDING_USER" "$INSTALL_DIR/.env"
     
-    # Create database directory with correct ownership
-    $SUDO_PREFIX mkdir -p "$INSTALL_DIR/database"
-    $SUDO_PREFIX chown "$SMARTGLIDING_USER:$SMARTGLIDING_USER" "$INSTALL_DIR/database"
+    # Create database directory with correct ownership (only if using embedded DB)
+    if [ "$USE_EXTERNAL_DB" = false ]; then
+        $SUDO_PREFIX mkdir -p "$INSTALL_DIR/database"
+        $SUDO_PREFIX chown "$SMARTGLIDING_USER:$SMARTGLIDING_USER" "$INSTALL_DIR/database"
+        print_success "Database directory created for embedded MongoDB"
+    fi
     
     print_success "Installation files created in $INSTALL_DIR"
+    print_status "Database type: $([ "$USE_EXTERNAL_DB" = true ] && echo "External MongoDB" || echo "Embedded MongoDB")"
 }
 
 # Deploy the stack
@@ -494,6 +639,14 @@ show_completion() {
     echo -e "║                    INSTALLATION COMPLETE                    ║"
     echo -e "╚══════════════════════════════════════════════════════════════╝${NC}"
     echo
+    echo -e "${BLUE}Configuration Summary:${NC}"
+    echo "• Database: $([ "$USE_EXTERNAL_DB" = true ] && echo "External MongoDB" || echo "Embedded MongoDB")"
+    echo "• Database URL: $MONGODB_URL"
+    echo "• JWT Secret: ${JWT_SECRET:0:12}... (${#JWT_SECRET} characters)"
+    echo "• Webhook API Key: ${WEBHOOK_API_KEY:0:8}... (${#WEBHOOK_API_KEY} characters)"
+    echo "• Installation Directory: $INSTALL_DIR"
+    echo "• Service User: $SMARTGLIDING_USER"
+    echo
     echo -e "${BLUE}Next Steps:${NC}"
     echo "1. Open your web browser"
     echo "2. Navigate to: http://$(hostname -I | awk '{print $1}'):3000/install"
@@ -506,8 +659,10 @@ show_completion() {
     echo "• Start services: sudo -u $SMARTGLIDING_USER docker compose -f $INSTALL_DIR/docker-compose.yml up -d"
     echo "• Update system:  sudo -u $SMARTGLIDING_USER docker compose -f $INSTALL_DIR/docker-compose.yml pull && sudo -u $SMARTGLIDING_USER docker compose -f $INSTALL_DIR/docker-compose.yml up -d"
     echo
-    echo -e "${YELLOW}Installation directory: $INSTALL_DIR${NC}"
-    echo -e "${YELLOW}Service user: $SMARTGLIDING_USER${NC}"
+    echo -e "${YELLOW}Configuration stored in: $INSTALL_DIR/.env${NC}"
+    if [ "$USE_EXTERNAL_DB" = false ]; then
+        echo -e "${YELLOW}Database files stored in: $INSTALL_DIR/database${NC}"
+    fi
     echo
     print_success "Welcome to SmartGliding! 🛩️"
 }
@@ -521,6 +676,7 @@ main() {
     install_docker
     verify_docker
     create_smartgliding_user
+    configure_installation
     create_installation
     deploy_stack
     wait_for_services
