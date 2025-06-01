@@ -124,22 +124,34 @@ detect_os() {
 # Check if running as root
 check_root() {
     if [ "$EUID" -eq 0 ]; then
-        print_warning "Running as root detected!"
-        print_warning "For security reasons, it's recommended to run this script as a regular user with sudo privileges."
-        print_warning "Running as root will skip Docker group configuration."
+        print_success "Running as root - perfect for system installation!"
+        print_status "Root privileges are required to:"
+        print_status "  • Create the smartgliding system user"
+        print_status "  • Set up /opt/smartgliding directory"
+        print_status "  • Install Docker (if needed)"
+        print_status "  • Configure proper permissions"
         echo
-        read -p "Do you want to continue as root? (y/N): " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            print_error "Installation cancelled. Please run as a regular user with sudo privileges."
-            exit 1
-        fi
+        print_status "The SmartGliding services will run as the dedicated 'smartgliding' user for security."
         RUNNING_AS_ROOT=true
         USE_SUDO=""
-        print_warning "Continuing as root..."
     else
+        print_status "Running as regular user: $USER"
+        print_status "This script requires root privileges to create system users and install software."
+        print_warning "You will be prompted for sudo access when needed."
+        echo
         RUNNING_AS_ROOT=false
         USE_SUDO=""  # Will be set to "sudo" if needed in verify_docker
+        
+        # Check if user has sudo privileges
+        if ! sudo -n true 2>/dev/null; then
+            print_error "This script requires sudo privileges to:"
+            print_error "  • Create the smartgliding system user"
+            print_error "  • Install Docker (if needed)"
+            print_error "  • Set up system directories and permissions"
+            echo
+            print_error "Please run with sudo or as root: sudo $0"
+            exit 1
+        fi
     fi
 }
 
