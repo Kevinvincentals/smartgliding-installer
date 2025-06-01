@@ -444,22 +444,16 @@ EOF
 deploy_stack() {
     print_status "Deploying SmartGliding platform..."
     
-    # Set sudo prefix based on whether we're root or not
-    local SUDO_PREFIX=""
-    if [ "$RUNNING_AS_ROOT" = false ]; then
-        SUDO_PREFIX="sudo"
-    fi
-    
     # Change to installation directory
     cd "$INSTALL_DIR"
     
     # Pull images first
     print_status "Pulling Docker images (this may take a few minutes)..."
-    $SUDO_PREFIX -u "$SMARTGLIDING_USER" docker compose pull
+    sudo -u "$SMARTGLIDING_USER" docker compose pull
     
     # Start services
     print_status "Starting services..."
-    $SUDO_PREFIX -u "$SMARTGLIDING_USER" docker compose up -d
+    sudo -u "$SMARTGLIDING_USER" docker compose up -d
     
     print_success "Services started successfully"
 }
