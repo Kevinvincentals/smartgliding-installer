@@ -296,32 +296,19 @@ configure_installation() {
     print_status "Starting configuration..."
     echo
     
-    # Check for environment variable overrides
+    # Check for environment variable overrides first
     if [ ! -z "$SMARTGLIDING_MONGODB_URL" ] || [ ! -z "$SMARTGLIDING_JWT_SECRET" ] || [ ! -z "$SMARTGLIDING_WEBHOOK_KEY" ]; then
         print_status "Environment variable configuration detected:"
         [ ! -z "$SMARTGLIDING_MONGODB_URL" ] && print_status "  • Custom MongoDB URL provided"
         [ ! -z "$SMARTGLIDING_JWT_SECRET" ] && print_status "  • Custom JWT secret provided"
         [ ! -z "$SMARTGLIDING_WEBHOOK_KEY" ] && print_status "  • Custom webhook key provided"
         echo
-    fi
-    
-    # Check if we're in interactive mode
-    if [ -t 0 ] && [ -t 1 ]; then
-        INTERACTIVE_MODE=true
-        print_status "Interactive mode detected - you can customize the installation"
+        
+        # Use environment variables - skip interactive questions
+        SKIP_INTERACTIVE=true
     else
-        INTERACTIVE_MODE=false
-        print_warning "Non-interactive mode detected (running via pipe)"
-        print_status "Using secure defaults for installation..."
-        print_status "To customize settings, you can either:"
-        print_status "  1. Download and run the script directly:"
-        print_status "     wget https://raw.githubusercontent.com/Kevinvincentals/smartgliding-installer/main/install.sh"
-        print_status "     chmod +x install.sh && ./install.sh"
-        print_status "  2. Or use environment variables:"
-        print_status "     SMARTGLIDING_MONGODB_URL='your-url' curl ... | bash"
-        print_status "     SMARTGLIDING_JWT_SECRET='your-secret' curl ... | bash"
-        print_status "     SMARTGLIDING_WEBHOOK_KEY='your-key' curl ... | bash"
-        echo
+        print_status "Interactive configuration - please answer the following questions:"
+        SKIP_INTERACTIVE=false
     fi
     
     # Database configuration
@@ -335,7 +322,7 @@ configure_installation() {
             print_error "Invalid SMARTGLIDING_MONGODB_URL format. Please ensure it starts with mongodb:// or mongodb+srv://"
             exit 1
         fi
-    elif [ "$INTERACTIVE_MODE" = true ]; then
+    elif [ "$SKIP_INTERACTIVE" = false ]; then
         print_status "Database Configuration"
         echo "SmartGliding can use either an embedded MongoDB or connect to your existing database."
         echo
@@ -363,24 +350,24 @@ configure_installation() {
             MONGODB_URL="mongodb://mongodb:27017/smartgliding?replicaSet=rs0"
         fi
     else
-        # Non-interactive mode - use embedded database by default
+        # Default for environment variable mode
         USE_EXTERNAL_DB=false
         MONGODB_URL="mongodb://mongodb:27017/smartgliding?replicaSet=rs0"
-        print_success "Using embedded MongoDB (default for non-interactive mode)"
+        print_success "Using embedded MongoDB (default)"
     fi
     
     echo
     print_status "Security Configuration"
     
-    # Handle security settings based on mode and environment variables
+    # Handle security settings
     if [ ! -z "$SMARTGLIDING_JWT_SECRET" ] && [ ! -z "$SMARTGLIDING_WEBHOOK_KEY" ]; then
         # Both provided via environment
         JWT_SECRET="$SMARTGLIDING_JWT_SECRET"
         WEBHOOK_API_KEY="$SMARTGLIDING_WEBHOOK_KEY"
         print_success "Using JWT secret from environment: ${JWT_SECRET:0:8}... (${#JWT_SECRET} characters)"
         print_success "Using webhook key from environment: ${WEBHOOK_API_KEY:0:8}... (${#WEBHOOK_API_KEY} characters)"
-    elif [ "$INTERACTIVE_MODE" = true ]; then
-        # Interactive mode - ask user preference first
+    elif [ "$SKIP_INTERACTIVE" = false ]; then
+        # Always ask in interactive mode
         echo "SmartGliding requires a JWT secret and webhook API key for security."
         echo
         read -p "Do you want to set custom JWT secret and webhook API key? (y/N): " -r
@@ -412,7 +399,7 @@ configure_installation() {
             print_success "Generated webhook API key: ${WEBHOOK_API_KEY:0:8}... (32 characters)"
         fi
     else
-        # Non-interactive mode - generate secure defaults
+        # Environment variable mode - generate secure defaults
         print_status "Generating secure random values for JWT secret and API keys..."
         
         # Use environment variables if provided, otherwise generate
