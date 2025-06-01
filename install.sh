@@ -293,69 +293,130 @@ generate_random_string() {
 
 # Interactive configuration
 configure_installation() {
-    print_status "Starting interactive configuration..."
+    print_status "Starting configuration..."
     echo
+    
+    # Check for environment variable overrides
+    if [ ! -z "$SMARTGLIDING_MONGODB_URL" ] || [ ! -z "$SMARTGLIDING_JWT_SECRET" ] || [ ! -z "$SMARTGLIDING_WEBHOOK_KEY" ]; then
+        print_status "Environment variable configuration detected:"
+        [ ! -z "$SMARTGLIDING_MONGODB_URL" ] && print_status "  • Custom MongoDB URL provided"
+        [ ! -z "$SMARTGLIDING_JWT_SECRET" ] && print_status "  • Custom JWT secret provided"
+        [ ! -z "$SMARTGLIDING_WEBHOOK_KEY" ] && print_status "  • Custom webhook key provided"
+        echo
+    fi
+    
+    # Check if we're in interactive mode
+    if [ -t 0 ] && [ -t 1 ]; then
+        INTERACTIVE_MODE=true
+        print_status "Interactive mode detected - you can customize the installation"
+    else
+        INTERACTIVE_MODE=false
+        print_warning "Non-interactive mode detected (running via pipe)"
+        print_status "Using secure defaults for installation..."
+        print_status "To customize settings, you can either:"
+        print_status "  1. Download and run the script directly:"
+        print_status "     wget https://raw.githubusercontent.com/Kevinvincentals/smartgliding-installer/main/install.sh"
+        print_status "     chmod +x install.sh && ./install.sh"
+        print_status "  2. Or use environment variables:"
+        print_status "     SMARTGLIDING_MONGODB_URL='your-url' curl ... | bash"
+        print_status "     SMARTGLIDING_JWT_SECRET='your-secret' curl ... | bash"
+        print_status "     SMARTGLIDING_WEBHOOK_KEY='your-key' curl ... | bash"
+        echo
+    fi
     
     # Database configuration
-    print_status "Database Configuration"
-    echo "SmartGliding can use either an embedded MongoDB or connect to your existing database."
-    echo
-    read -p "Do you have your own MongoDB database you want to use? (y/N): " -n 1 -r
-    echo
-    echo
-    
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        USE_EXTERNAL_DB=true
-        print_status "Please provide your MongoDB connection string."
-        echo "Example: mongodb://username:password@your-server:27017/smartgliding?replicaSet=rs0"
-        echo "Or: mongodb+srv://username:password@cluster.mongodb.net/smartgliding"
-        echo
-        read -p "MongoDB URL: " MONGODB_URL
-        
-        # Validate URL format
-        if [[ ! $MONGODB_URL =~ ^mongodb(\+srv)?:// ]]; then
-            print_error "Invalid MongoDB URL format. Please ensure it starts with mongodb:// or mongodb+srv://"
+    if [ ! -z "$SMARTGLIDING_MONGODB_URL" ]; then
+        # Environment variable provided
+        MONGODB_URL="$SMARTGLIDING_MONGODB_URL"
+        if [[ $MONGODB_URL =~ ^mongodb(\+srv)?:// ]]; then
+            USE_EXTERNAL_DB=true
+            print_success "Using external MongoDB from environment: ${MONGODB_URL:0:20}..."
+        else
+            print_error "Invalid SMARTGLIDING_MONGODB_URL format. Please ensure it starts with mongodb:// or mongodb+srv://"
             exit 1
         fi
+    elif [ "$INTERACTIVE_MODE" = true ]; then
+        print_status "Database Configuration"
+        echo "SmartGliding can use either an embedded MongoDB or connect to your existing database."
+        echo
+        read -p "Do you have your own MongoDB database you want to use? (y/N): " -n 1 -r
+        echo
+        echo
         
-        print_success "External MongoDB configured: $MONGODB_URL"
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            USE_EXTERNAL_DB=true
+            print_status "Please provide your MongoDB connection string."
+            echo "Example: mongodb://username:password@your-server:27017/smartgliding?replicaSet=rs0"
+            echo "Or: mongodb+srv://username:password@cluster.mongodb.net/smartgliding"
+            echo
+            read -p "MongoDB URL: " MONGODB_URL
+            
+            # Validate URL format
+            if [[ ! $MONGODB_URL =~ ^mongodb(\+srv)?:// ]]; then
+                print_error "Invalid MongoDB URL format. Please ensure it starts with mongodb:// or mongodb+srv://"
+                exit 1
+            fi
+            
+            print_success "External MongoDB configured: $MONGODB_URL"
+        else
+            USE_EXTERNAL_DB=false
+            print_success "Will use embedded MongoDB with automatic setup"
+            MONGODB_URL="mongodb://mongodb:27017/smartgliding?replicaSet=rs0"
+        fi
     else
+        # Non-interactive mode - use embedded database by default
         USE_EXTERNAL_DB=false
-        print_success "Will use embedded MongoDB with automatic setup"
         MONGODB_URL="mongodb://mongodb:27017/smartgliding?replicaSet=rs0"
+        print_success "Using embedded MongoDB (default for non-interactive mode)"
     fi
     
     echo
     print_status "Security Configuration"
-    echo "Generating secure random values for JWT secret and API keys..."
+    print_status "Generating secure random values for JWT secret and API keys..."
     
-    # Generate random secrets
-    JWT_SECRET=$(generate_random_string 64)
-    WEBHOOK_API_KEY=$(generate_random_string 32)
+    # Generate random secrets or use environment variables
+    if [ ! -z "$SMARTGLIDING_JWT_SECRET" ]; then
+        JWT_SECRET="$SMARTGLIDING_JWT_SECRET"
+        print_success "Using JWT secret from environment: ${JWT_SECRET:0:8}... (${#JWT_SECRET} characters)"
+    else
+        JWT_SECRET=$(generate_random_string 64)
+        print_success "Generated JWT secret: ${JWT_SECRET:0:8}... (64 characters)"
+    fi
     
-    print_success "Generated JWT secret: ${JWT_SECRET:0:8}... (64 characters)"
-    print_success "Generated webhook API key: ${WEBHOOK_API_KEY:0:8}... (32 characters)"
+    if [ ! -z "$SMARTGLIDING_WEBHOOK_KEY" ]; then
+        WEBHOOK_API_KEY="$SMARTGLIDING_WEBHOOK_KEY"
+        print_success "Using webhook key from environment: ${WEBHOOK_API_KEY:0:8}... (${#WEBHOOK_API_KEY} characters)"
+    else
+        WEBHOOK_API_KEY=$(generate_random_string 32)
+        print_success "Generated webhook API key: ${WEBHOOK_API_KEY:0:8}... (32 characters)"
+    fi
     
-    echo
-    read -p "Do you want to customize these security settings? (y/N): " -n 1 -r
-    echo
-    
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
+    if [ "$INTERACTIVE_MODE" = true ] && [ -z "$SMARTGLIDING_JWT_SECRET" ] && [ -z "$SMARTGLIDING_WEBHOOK_KEY" ]; then
         echo
-        print_status "Current JWT Secret: $JWT_SECRET"
-        read -p "Enter custom JWT secret (or press Enter to keep current): " CUSTOM_JWT
-        if [ ! -z "$CUSTOM_JWT" ]; then
-            JWT_SECRET="$CUSTOM_JWT"
-            print_success "JWT secret updated"
-        fi
+        read -p "Do you want to customize these security settings? (y/N): " -n 1 -r
+        echo
         
-        echo
-        print_status "Current Webhook API Key: $WEBHOOK_API_KEY"
-        read -p "Enter custom webhook API key (or press Enter to keep current): " CUSTOM_WEBHOOK
-        if [ ! -z "$CUSTOM_WEBHOOK" ]; then
-            WEBHOOK_API_KEY="$CUSTOM_WEBHOOK"
-            print_success "Webhook API key updated"
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            echo
+            print_status "Current JWT Secret: $JWT_SECRET"
+            read -p "Enter custom JWT secret (or press Enter to keep current): " CUSTOM_JWT
+            if [ ! -z "$CUSTOM_JWT" ]; then
+                JWT_SECRET="$CUSTOM_JWT"
+                print_success "JWT secret updated"
+            fi
+            
+            echo
+            print_status "Current Webhook API Key: $WEBHOOK_API_KEY"
+            read -p "Enter custom webhook API key (or press Enter to keep current): " CUSTOM_WEBHOOK
+            if [ ! -z "$CUSTOM_WEBHOOK" ]; then
+                WEBHOOK_API_KEY="$CUSTOM_WEBHOOK"
+                print_success "Webhook API key updated"
+            fi
         fi
+    elif [ ! -z "$SMARTGLIDING_JWT_SECRET" ] || [ ! -z "$SMARTGLIDING_WEBHOOK_KEY" ]; then
+        print_status "Using provided environment variables for security settings"
+    else
+        print_status "Using generated secure defaults (non-interactive mode)"
     fi
     
     echo
